@@ -25,13 +25,13 @@ const formatHHMMSS = (totalSeconds: number) => {
 }
 
 const PRESETS: { label: string; icon: string; minutes: number }[] = [
-  { label: "One Piece TCG", icon: "🟡", minutes: 30 },
-  { label: "Magic: The Gathering", icon: "🧙", minutes: 50 },
-  { label: "Pokémon TCG", icon: "⚡", minutes: 50 },
+  { label: "One Piece", icon: "🟡", minutes: 30 },
+  { label: "Magic: The Gathering", icon: "🧙", minutes: 30 },
+  { label: "Pokémon", icon: "⚡", minutes: 30 },
   { label: "Yu‑Gi‑Oh!", icon: "🜲", minutes: 45 },
-  { label: "Lorcana", icon: "✨", minutes: 50 },
-  { label: "Gundam", icon: "🤖", minutes: 50 },
-  { label: "Riftbound", icon: "🌊", minutes: 50 },
+  { label: "Lorcana", icon: "✨", minutes: 30 },
+  { label: "Gundam", icon: "🤖", minutes: 30 },
+  { label: "Riftbound", icon: "🌊", minutes: 30 },
 ]
 
 // Speech synthesis helper (English/Spanish only) with a small queue so we don't overlap announcements.
@@ -68,12 +68,10 @@ function useSpeech(enabled: boolean, language?: 'en' | 'es') {
 function useBackdrop() {
   const [bg, setBg] = useState<string | undefined>(() => localStorage.getItem("tcg_bg") || undefined)
   const onFile = async (file: File) => {
-    const buf = await file.arrayBuffer()
-    const blob = new Blob([buf])
     const url = await new Promise<string>((resolve) => {
       const r = new FileReader()
       r.onload = () => resolve(String(r.result))
-      r.readAsDataURL(blob)
+      r.readAsDataURL(file)
     })
     localStorage.setItem("tcg_bg", url)
     setBg(url)
@@ -122,14 +120,31 @@ function useAudioAssets() {
   return { assets, setFile, clear, play }
 }
 
-// Persist timers to localStorage so refreshes don't nuke your setup.
+// Persist timers to localStorage so refreshes don't nuke your setup, and migrate old entries
 function usePersistentTimers() {
   const [timers, setTimers] = useState<GameTimer[]>(() => {
     const raw = localStorage.getItem("tcg_timers")
     if (!raw) return []
     try {
-      const parsed = JSON.parse(raw) as GameTimer[]
-      return parsed
+      const parsed = JSON.parse(raw) as any[]
+      const safe = (parsed || []).map((t, i): GameTimer => {
+        const id = t.id || (typeof crypto !== 'undefined' && (crypto as any).randomUUID ? crypto.randomUUID() : `${Date.now()}_${i}`)
+        const durationSec = typeof t.durationSec === 'number' ? t.durationSec : Math.max(60, (t.minutes ? t.minutes * 60 : 3000))
+        const remainingSec = Math.min(durationSec, typeof t.remainingSec === 'number' ? t.remainingSec : durationSec)
+        const status: TimerStatus = t.status === 'RUNNING' || t.status === 'FINISHED' ? t.status : 'PAUSED'
+        const announceAt = Array.isArray(t.announceAt) ? t.announceAt : [300, 120]
+        return {
+          id,
+          game: t.game || 'Untitled Game',
+          icon: t.icon || '🎮',
+          durationSec,
+          remainingSec,
+          status,
+          announceAt,
+          pinned: !!t.pinned,
+        }
+      })
+      return safe
     } catch {
       return []
     }
@@ -146,15 +161,24 @@ function usePersistentTimers() {
 export default function TimerBoard() {
   const [timers, setTimers] = usePersistentTimers()
   const [showAdmin, setShowAdmin] = useState(true)
-  const [tickRateMs] = useState(1000) // fixed; removed from UI
+  const tickRateMs = 1000 // fixed; field removed from UI
   const [overlay, setOverlay] = useState<string | null>(null)
   const [speechEnabled, setSpeechEnabled] = useState(true)
   const [language, setLanguage] = useState<'en' | 'es'>('en')
   const speak = useSpeech(speechEnabled, language)
   const { bg, onFile: onBackdropFile, clear: clearBackdrop } = useBackdrop()
-  const [displayMode, setDisplayMode] = useState(false)
-  const [displayLayout, setDisplayLayout] = useState<1 | 2>(1)
+  const [displayMode, setDisplayMode] = useState(false) // minimal view
+  const [blinkAtMin, setBlinkAtMin] = useState(3) // red/white blink when <= this many minutes
   const audio = useAudioAssets()
+
+  // Key: allow ESC to exit Display Mode
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDisplayMode(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // Ticking
   useEffect(() => {
@@ -168,7 +192,7 @@ export default function TimerBoard() {
       )
     }, tickRateMs)
     return () => clearInterval(t)
-  }, [setTimers, tickRateMs])
+  }, [setTimers])
 
   // Announcements + Overlay when crossing milestones
   const lastSeen = useRef<Record<string, number>>({})
@@ -176,7 +200,7 @@ export default function TimerBoard() {
     timers.forEach((tm) => {
       if (tm.status === "FINISHED") {
         if (lastSeen.current[tm.id] !== -1) {
-          if (!audio.play('time')) announce(`${tm.game}, time! Please finish your current action.`)
+          if (!audio.play('time')) announce(`${tm.game}, tiempo, 3 turnos o 5 minutos.`)
           if (!displayMode) {
             setOverlay(`${tm.game}: TIME!`)
             setTimeout(() => setOverlay(null), 5000)
@@ -189,11 +213,11 @@ export default function TimerBoard() {
       const remaining = Math.ceil(tm.remainingSec)
       if (tm.announceAt.includes(remaining) && prev !== remaining) {
         if (remaining === 300) {
-          if (!audio.play('five')) announce(`${tm.game}, you have 5 minutes remaining.`)
+          if (!audio.play('five')) announce(`${tm.game}, les quedan 5 minutos.`)
         } else if (remaining === 120) {
-          if (!audio.play('two')) announce(`${tm.game}, only 2 minutes left.`)
+          if (!audio.play('two')) announce(`${tm.game}, les quedan 2 minutos.`)
         } else {
-          announce(`${tm.game}, ${Math.floor(remaining / 60)} minutes remaining.`)
+          announce(`${tm.game}, ${Math.floor(remaining / 60)} minutos restantes.`)
         }
         if (!displayMode) {
           setOverlay(`${tm.game}: ${formatHHMMSS(remaining)} left`)
@@ -206,12 +230,11 @@ export default function TimerBoard() {
   }, [timers, displayMode])
 
   function announce(text: string) {
-    // Translate the canned messages if Spanish selected (super-lightweight)
     if (language === 'es') {
       text = text
         .replace('you have 5 minutes remaining', 'les quedan 5 minutos')
         .replace('only 2 minutes left', 'solo quedan 2 minutos')
-        .replace('time! Please finish your current action.', '¡tiempo! Por favor termine su acción actual.')
+        .replace('time! 3 turns or 5 more minutes.', '¡tiempo! 3 turnos o 5 minutos.')
     }
     speak(text)
   }
@@ -241,24 +264,81 @@ export default function TimerBoard() {
     delete lastSeen.current[id]
   }
 
-  const runningCount = useMemo(() => timers.filter((t) => t.status !== "FINISHED").length, [timers])
+  const running = useMemo(() => timers.filter((t) => t.status !== "FINISHED"), [timers])
+  const pinned = useMemo(() => timers.filter((t) => t.pinned && t.status !== 'FINISHED'), [timers])
+  const source = pinned.length ? pinned : (running.length ? running : timers)
+  const displayList = displayMode ? source.slice(0, 4) : timers // up to 4 in display mode
+  const count = displayMode ? displayList.length : running.length || timers.length || 1
 
-  // Decide which timers to show in Display Mode
-  const displayCandidates = useMemo(() => {
-    const pinned = timers.filter((t) => t.pinned && t.status !== 'FINISHED')
-    if (pinned.length > 0) return pinned
-    const running = timers.filter((t) => t.status !== 'FINISHED')
-    return running.length > 0 ? running : timers
-  }, [timers])
+  // --- Pure Display for 1 timer ---
+  if (displayMode && count === 1) {
+    const tm = displayList[0]
+    const shouldBlink = tm.remainingSec <= blinkAtMin * 60 && tm.status !== 'FINISHED'
+    const minutesLeft = Math.ceil(tm.remainingSec / 60)
 
-  const timersToRender = displayMode ? displayCandidates.slice(0, displayLayout) : timers
-  const timeSizeClass = displayMode ? (displayLayout === 1 ? 'text-[18vw] md:text-[18vw]' : 'text-[12vw] md:text-[12vw]') : 'text-6xl md:text-7xl'
+    return (
+      <div className="w-full h-screen relative text-white">
+        {/* Inline CSS for red/white blink */}
+        <style>{`
+          @keyframes redwhite { 0%{color:#ffffff} 50%{color:#f87171} 100%{color:#ffffff} }
+          .blink-red-white { animation: redwhite 1s steps(1,end) infinite; }
+        `}</style>
+        <div
+          className="absolute inset-0 bg-cover bg-center opacity-30 pointer-events-none"
+          style={{ backgroundImage: bg ? `url(${bg})` : "linear-gradient(135deg,#0f172a,#1e293b)" }}
+        />
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-10 p-6 text-center">
+          <div className="text-3xl md:text-5xl font-bold drop-shadow mb-2">{tm.game}</div>
+          <div
+            className={`font-extrabold tracking-tight leading-none drop-shadow ${shouldBlink ? 'blink-red-white' : ''} pointer-events-none select-none`}
+            style={{ fontSize: 'min(36vw, 75vh)' }}
+          >
+            {formatHHMMSS(tm.remainingSec)}
+          </div>
 
+          {/* Emphasis ribbon when in last X minutes */}
+          {tm.remainingSec <= Math.max(blinkAtMin, 5) * 60 && (
+            <div className="mt-4 text-white/90 text-2xl md:text-4xl font-bold border-2 border-red-400 rounded-2xl px-4 py-2 drop-shadow animate-pulse">
+              {language === 'es' ? `¡Quedan ${minutesLeft} minuto${minutesLeft!==1?'s':''}!` : `${minutesLeft} minute${minutesLeft!==1?'s':''} left!`}
+            </div>
+          )}
+
+          <button
+            onClick={() => setDisplayMode(false)}
+            className="absolute bottom-3 right-3 text-xs px-2 py-1 rounded-lg bg-black/30 border border-white/20 hover:bg-black/50"
+            title="Exit Display"
+          >
+            Exit
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // --- Pure Display for 2–4 timers: split halves or corners ---
+  if (displayMode && count >= 2) {
+    return (
+      <DisplayWall
+        list={displayList}
+        bg={bg}
+        blinkAtSec={blinkAtMin * 60}
+        onExit={() => setDisplayMode(false)}
+      />
+    )
+  }
+
+  // --- Normal / Admin view ---
   return (
     <div className="w-full min-h-screen relative text-white">
+      {/* Inline CSS for red/white blink */}
+      <style>{`
+        @keyframes redwhite { 0%{color:#ffffff} 50%{color:#f87171} 100%{color:#ffffff} }
+        .blink-red-white { animation: redwhite 1s steps(1,end) infinite; }
+      `}</style>
+
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-cover bg-center opacity-30"
+        className="absolute inset-0 bg-cover bg-center opacity-30 pointer-events-none"
         style={{ backgroundImage: bg ? `url(${bg})` : "linear-gradient(135deg,#0f172a,#1e293b)" }}
       />
 
@@ -283,19 +363,12 @@ export default function TimerBoard() {
               Voice
             </label>
             <button
-              onClick={() => setDisplayMode((v) => !v)}
+              onClick={() => setDisplayMode(true)}
               className="px-3 py-2 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20"
               title="Minimal display (timers only)"
             >
-              {displayMode ? "Exit Display" : "Display Mode"}
+              Display Mode
             </button>
-            {displayMode && (
-              <div className="flex items-center gap-1 text-sm bg-white/10 px-2 py-2 rounded-2xl border border-white/20">
-                <span className="opacity-80 mr-1">Layout</span>
-                <button onClick={() => setDisplayLayout(1)} className={`px-2 py-1 rounded-xl ${displayLayout===1? 'bg-white/30':'bg-white/10'} border border-white/20`}>1</button>
-                <button onClick={() => setDisplayLayout(2)} className={`px-2 py-1 rounded-xl ${displayLayout===2? 'bg-white/30':'bg-white/10'} border border-white/20`}>2</button>
-              </div>
-            )}
           </div>
         </header>
 
@@ -320,39 +393,95 @@ export default function TimerBoard() {
             onAddTimer={addTimer}
             language={language}
             setLanguage={setLanguage}
-            onBackdropFile={(f) => onBackdropFile(f)}
+            blinkAtMin={blinkAtMin}
+            setBlinkAtMin={setBlinkAtMin}
+            onBackdropFile={onBackdropFile}
             clearBackdrop={clearBackdrop}
             audio={audio}
           />
         )}
 
-        {/* Timers Grid */}
-        <div className={`grid ${displayMode ? (displayLayout === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2') : (runningCount <= 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2')} gap-4 mt-4`}>
-          {timersToRender.map((tm) => (
+        {/* Timers Grid (normal view) */}
+        <div className={`grid ${running.length <= 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'} gap-4 mt-4`}>
+          {timers.map((tm) => (
             <TimerCard
               key={tm.id}
               timer={tm}
               onUpdate={updateTimer}
               onRemove={removeTimer}
-              minimal={displayMode}
-              timeSizeClass={timeSizeClass}
-              showPin={!displayMode && showAdmin}
+              minimal={false}
+              blinkAtSec={blinkAtMin * 60}
+              showPin={showAdmin}
             />
           ))}
-          {!displayMode && timers.length === 0 && (
+          {timers.length === 0 && (
             <div className="rounded-3xl p-8 bg-black/30 border border-white/10 text-center">
               <p className="opacity-90">No timers yet. Use the admin panel to add a game timer.</p>
             </div>
           )}
-        </div>
       </div>
+    </div>
 
-      {/* Big overlay for milestones (hidden in Display Mode) */}
-      {overlay && !displayMode && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur">
+      {/* Big overlay for milestones */}
+      {overlay && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur pointer-events-none">
           <div className="text-5xl md:text-7xl font-extrabold text-white drop-shadow-xl animate-pulse">{overlay}</div>
         </div>
       )}
+    </div>
+  )
+}
+
+// --- Display Mode wall for 2–4 timers ---
+function DisplayWall({ list, bg, blinkAtSec, onExit }: { list: GameTimer[]; bg?: string; blinkAtSec: number; onExit: () => void }) {
+  const positions = (n: number): Array<'L'|'R'|'TL'|'TR'|'BL'|'BR'> => {
+    if (n === 2) return ['L','R']
+    if (n === 3) return ['TL','TR','BL']
+    return ['TL','TR','BL','BR'] // 4
+  }
+  const pos = positions(Math.min(4, list.length))
+
+  return (
+    <div className="fixed inset-0 text-white">
+      <style>{`
+        @keyframes redwhite { 0%{color:#ffffff} 50%{color:#f87171} 100%{color:#ffffff} }
+        .blink-red-white { animation: redwhite 1s steps(1,end) infinite; }
+      `}</style>
+
+      <div className="absolute inset-0 bg-cover bg-center opacity-30 pointer-events-none" style={{ backgroundImage: bg ? `url(${bg})` : "linear-gradient(135deg,#0f172a,#1e293b)" }} />
+
+      {list.map((tm, i) => (
+        <DisplayTile key={tm.id} tm={tm} where={pos[i]} blinkAtSec={blinkAtSec} />
+      ))}
+
+      <button onClick={onExit} className="fixed bottom-3 right-3 z-20 text-xs px-2 py-1 rounded-lg bg-black/30 border border-white/20 hover:bg-black/50">
+        Exit
+      </button>
+    </div>
+  )
+}
+
+function DisplayTile({ tm, where, blinkAtSec }: { tm: GameTimer; where: 'L'|'R'|'TL'|'TR'|'BL'|'BR'; blinkAtSec: number }) {
+  const map: Record<string, string> = {
+    'L':  'left-0 top-0 w-1/2 h-screen',
+    'R':  'right-0 top-0 w-1/2 h-screen',
+    'TL': 'left-0 top-0 w-1/2 h-1/2',
+    'TR': 'right-0 top-0 w-1/2 h-1/2',
+    'BL': 'left-0 bottom-0 w-1/2 h-1/2',
+    'BR': 'right-0 bottom-0 w-1/2 h-1/2',
+  }
+  const fontSize = (where === 'L' || where === 'R') ? 'min(32vh, 22vw)' : 'min(20vh, 18vw)'
+  const shouldBlink = tm.remainingSec <= blinkAtSec && tm.status !== 'FINISHED'
+
+  return (
+    <div className={`absolute ${map[where]} flex flex-col items-center justify-center p-3`}> 
+      <div className="text-2xl md:text-4xl font-bold drop-shadow mb-2 text-center">{tm.game}</div>
+      <div
+        className={`font-extrabold tracking-tight leading-none drop-shadow ${shouldBlink ? 'blink-red-white' : ''} pointer-events-none select-none text-center`}
+        style={{ fontSize }}
+      >
+        {formatHHMMSS(tm.remainingSec)}
+      </div>
     </div>
   )
 }
@@ -362,27 +491,29 @@ function TimerCard({
   onUpdate,
   onRemove,
   minimal = false,
-  timeSizeClass = 'text-6xl md:text-7xl',
+  blinkAtSec,
   showPin = false,
 }: {
   timer: GameTimer
   onUpdate: (id: string, patch: Partial<GameTimer>) => void
   onRemove: (id: string) => void
   minimal?: boolean
-  timeSizeClass?: string
+  blinkAtSec: number
   showPin?: boolean
 }) {
   const pct = Math.max(0, Math.min(100, 100 * (timer.remainingSec / timer.durationSec)))
   const isLow = timer.remainingSec <= 120 && timer.status !== "FINISHED"
+  const shouldBlink = timer.remainingSec <= blinkAtSec && timer.status !== 'FINISHED'
 
   return (
-    <div className={`rounded-3xl overflow-hidden border ${isLow ? "border-red-400/60" : "border-white/10"} bg-white/5`}>
-      <div className="p-4 flex items-center justify-between gap-3">
+    <div className={`rounded-3xl overflow-hidden border ${isLow ? "border-red-400/60" : "border-white/10"} bg-white/5`}> 
+      {/* Header */}
+      <div className="p-4 flex items-center justify-between gap-3 relative z-10 pointer-events-auto">
         <div className="flex items-center gap-3">
           <div className="text-3xl" title={timer.game}>{timer.icon || "🎮"}</div>
           <div>
             <div className="text-xl font-semibold leading-tight">{timer.game}</div>
-            <div className="text-xs opacity-80">Total: {formatHHMMSS(timer.durationSec)}</div>
+            {!minimal && <div className="text-xs opacity-80">Total: {formatHHMMSS(timer.durationSec)}</div>}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -395,19 +526,21 @@ function TimerCard({
               {timer.pinned ? 'Pinned' : 'Pin to Display'}
             </button>
           )}
-          {!minimal && (
-            <button
-              onClick={() => onRemove(timer.id)}
-              className="text-sm px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20"
-            >
-              Remove
-            </button>
-          )}
+          <button
+            onClick={() => onRemove(timer.id)}
+            className="text-sm px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20"
+          >
+            Remove
+          </button>
         </div>
       </div>
 
-      <div className="px-4">
-        <div className={`${timeSizeClass} font-extrabold tracking-wider text-center drop-shadow`}>
+      {/* Big time */}
+      <div className="px-4 relative z-0">
+        <div
+          className={`font-extrabold tracking-tight text-center drop-shadow leading-none ${shouldBlink ? 'blink-red-white' : 'text-white'} pointer-events-none select-none`}
+          style={{ fontSize: 'min(18vw, 22vh)' }}
+        >
           {formatHHMMSS(timer.remainingSec)}
         </div>
         {!minimal && (
@@ -417,6 +550,7 @@ function TimerCard({
         )}
       </div>
 
+      {/* Controls (hidden in Display Mode) */}
       {!minimal && (
       <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-2">
         <button
@@ -485,6 +619,8 @@ function AdminPanel({
   onAddTimer,
   language,
   setLanguage,
+  blinkAtMin,
+  setBlinkAtMin,
   onBackdropFile,
   clearBackdrop,
   audio,
@@ -492,6 +628,8 @@ function AdminPanel({
   onAddTimer: (preset?: { game?: string; icon?: string; minutes?: number }) => void
   language: 'en' | 'es'
   setLanguage: (v: 'en' | 'es') => void
+  blinkAtMin: number
+  setBlinkAtMin: (n: number) => void
   onBackdropFile: (f: File) => void
   clearBackdrop: () => void
   audio: { assets: { five?: string; two?: string; time?: string }; setFile: (k: 'five'|'two'|'time', f: File) => void; clear: (k: 'five'|'two'|'time') => void; play: (k: 'five'|'two'|'time') => boolean }
@@ -570,6 +708,16 @@ function AdminPanel({
                 <option value="es">Español</option>
               </select>
             </label>
+            <label className="text-sm flex items-center gap-2 bg-white/10 px-3 py-2 rounded-2xl border border-white/20">
+              Blink when ≤ (min)
+              <input
+                type="number"
+                min={1}
+                className="text-black rounded-xl px-2 py-1 w-full"
+                value={blinkAtMin}
+                onChange={(e) => setBlinkAtMin(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </label>
           </div>
 
           <div className="space-y-2">
@@ -619,10 +767,6 @@ function AdminPanel({
               Clear background
             </button>
           </div>
-
-          <p className="text-xs opacity-80">
-            Tip: Pin one or two timers to control which are shown in Display Mode. Click **Display Mode** then **Toggle Fullscreen** for TVs.
-          </p>
         </div>
       </div>
     </div>
