@@ -11,6 +11,7 @@ type GameTimer = {
   remainingSec: number
   status: TimerStatus
   announceAt: number[] // seconds remaining at which to announce (e.g., [300, 120])
+  pinned?: boolean
 }
 
 // --- Utilities ---
@@ -28,12 +29,13 @@ const PRESETS: { label: string; icon: string; minutes: number }[] = [
   { label: "Magic: The Gathering", icon: "🧙", minutes: 50 },
   { label: "Pokémon TCG", icon: "⚡", minutes: 50 },
   { label: "Yu‑Gi‑Oh!", icon: "🜲", minutes: 45 },
-  { label: "Flesh and Blood", icon: "🛡️", minutes: 50 },
   { label: "Lorcana", icon: "✨", minutes: 50 },
+  { label: "Gundam", icon: "🤖", minutes: 50 },
+  { label: "Riftbound", icon: "🌊", minutes: 50 },
 ]
 
-// Speech synthesis helper with a small queue so we don't overlap announcements.
-function useSpeech(enabled: boolean, voiceName?: string) {
+// Speech synthesis helper (English/Spanish only) with a small queue so we don't overlap announcements.
+function useSpeech(enabled: boolean, language?: 'en' | 'es') {
   const queue = useRef<string[]>([])
   const speaking = useRef(false)
 
@@ -44,8 +46,9 @@ function useSpeech(enabled: boolean, voiceName?: string) {
       const next = queue.current.shift()
       if (!next) return
       const utter = new SpeechSynthesisUtterance(next)
-      if (voiceName) {
-        const v = window.speechSynthesis.getVoices().find((x) => x.name === voiceName)
+      if (language) {
+        const langPrefix = language.toLowerCase()
+        const v = window.speechSynthesis.getVoices().find((x) => x.lang.toLowerCase().startsWith(langPrefix))
         if (v) utter.voice = v
       }
       speaking.current = true
@@ -53,7 +56,7 @@ function useSpeech(enabled: boolean, voiceName?: string) {
       window.speechSynthesis.speak(utter)
     }, 250)
     return () => clearInterval(t)
-  }, [enabled, voiceName])
+  }, [enabled, language])
 
   return (text: string) => {
     if (!enabled) return
@@ -82,6 +85,43 @@ function useBackdrop() {
   return { bg, onFile, clear }
 }
 
+// Simple audio assets manager for announcements (optional prerecorded audio)
+function useAudioAssets() {
+  type Kind = 'five' | 'two' | 'time'
+  const key = (k: Kind) => `tcg_audio_${k}`
+  const [assets, setAssets] = useState<{ five?: string; two?: string; time?: string }>(() => ({
+    five: localStorage.getItem(key('five')) || undefined,
+    two: localStorage.getItem(key('two')) || undefined,
+    time: localStorage.getItem(key('time')) || undefined,
+  }))
+
+  const setFile = async (k: Kind, file: File) => {
+    const url = await new Promise<string>((resolve) => {
+      const r = new FileReader()
+      r.onload = () => resolve(String(r.result))
+      r.readAsDataURL(file)
+    })
+    localStorage.setItem(key(k), url)
+    setAssets((a) => ({ ...a, [k]: url }))
+  }
+  const clear = (k: Kind) => {
+    localStorage.removeItem(key(k))
+    setAssets((a) => {
+      const c = { ...a } as any
+      delete c[k]
+      return c
+    })
+  }
+  const play = (k: Kind) => {
+    const src = (assets as any)[k] as string | undefined
+    if (!src) return false
+    const a = new Audio(src)
+    a.play().catch(() => {})
+    return true
+  }
+  return { assets, setFile, clear, play }
+}
+
 // Persist timers to localStorage so refreshes don't nuke your setup.
 function usePersistentTimers() {
   const [timers, setTimers] = useState<GameTimer[]>(() => {
@@ -106,12 +146,15 @@ function usePersistentTimers() {
 export default function TimerBoard() {
   const [timers, setTimers] = usePersistentTimers()
   const [showAdmin, setShowAdmin] = useState(true)
-  const [tickRateMs, setTickRateMs] = useState(1000)
+  const [tickRateMs] = useState(1000) // fixed; removed from UI
   const [overlay, setOverlay] = useState<string | null>(null)
   const [speechEnabled, setSpeechEnabled] = useState(true)
-  const [voiceName, setVoiceName] = useState<string | undefined>(undefined)
-  const speak = useSpeech(speechEnabled, voiceName)
-  const { bg, onFile, onFile: onBackdropFile, clear: clearBackdrop } = useBackdrop()
+  const [language, setLanguage] = useState<'en' | 'es'>('en')
+  const speak = useSpeech(speechEnabled, language)
+  const { bg, onFile: onBackdropFile, clear: clearBackdrop } = useBackdrop()
+  const [displayMode, setDisplayMode] = useState(false)
+  const [displayLayout, setDisplayLayout] = useState<1 | 2>(1)
+  const audio = useAudioAssets()
 
   // Ticking
   useEffect(() => {
@@ -133,28 +176,43 @@ export default function TimerBoard() {
     timers.forEach((tm) => {
       if (tm.status === "FINISHED") {
         if (lastSeen.current[tm.id] !== -1) {
-          announce(`${tm.game}, time! Please finish your current action.`)
-          setOverlay(`${tm.game}: TIME!`)
+          if (!audio.play('time')) announce(`${tm.game}, time! Please finish your current action.`)
+          if (!displayMode) {
+            setOverlay(`${tm.game}: TIME!`)
+            setTimeout(() => setOverlay(null), 5000)
+          }
           lastSeen.current[tm.id] = -1
-          setTimeout(() => setOverlay(null), 5000)
         }
         return
       }
       const prev = lastSeen.current[tm.id]
       const remaining = Math.ceil(tm.remainingSec)
       if (tm.announceAt.includes(remaining) && prev !== remaining) {
-        if (remaining === 300) announce(`${tm.game}, les quedan 5 minutos.`)
-        else if (remaining === 120) announce(`${tm.game}, les quedan 2 minutos.`)
-        else announce(`${tm.game}, ${Math.floor(remaining / 60)} minutos restantes.`)
-        setOverlay(`${tm.game}: ${formatHHMMSS(remaining)} left`)
-        setTimeout(() => setOverlay(null), 3500)
+        if (remaining === 300) {
+          if (!audio.play('five')) announce(`${tm.game}, you have 5 minutes remaining.`)
+        } else if (remaining === 120) {
+          if (!audio.play('two')) announce(`${tm.game}, only 2 minutes left.`)
+        } else {
+          announce(`${tm.game}, ${Math.floor(remaining / 60)} minutes remaining.`)
+        }
+        if (!displayMode) {
+          setOverlay(`${tm.game}: ${formatHHMMSS(remaining)} left`)
+          setTimeout(() => setOverlay(null), 3500)
+        }
       }
       lastSeen.current[tm.id] = remaining
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timers])
+  }, [timers, displayMode])
 
   function announce(text: string) {
+    // Translate the canned messages if Spanish selected (super-lightweight)
+    if (language === 'es') {
+      text = text
+        .replace('you have 5 minutes remaining', 'les quedan 5 minutos')
+        .replace('only 2 minutes left', 'solo quedan 2 minutos')
+        .replace('time! Please finish your current action.', '¡tiempo! Por favor termine su acción actual.')
+    }
     speak(text)
   }
 
@@ -169,20 +227,32 @@ export default function TimerBoard() {
       remainingSec: duration,
       status: "PAUSED",
       announceAt: [300, 120],
+      pinned: false,
     }
     setTimers((t) => [...t, nt])
   }
 
   function updateTimer(id: string, patch: Partial<GameTimer>) {
-    setTimers((t) => t.map((x) => (x.id == id ? { ...x, ...patch } : x)))
+    setTimers((t) => t.map((x) => (x.id === id ? { ...x, ...patch } : x)))
   }
 
   function removeTimer(id: string) {
-    setTimers((t) => t.filter((x) => x.id != id))
+    setTimers((t) => t.filter((x) => x.id !== id))
     delete lastSeen.current[id]
   }
 
   const runningCount = useMemo(() => timers.filter((t) => t.status !== "FINISHED").length, [timers])
+
+  // Decide which timers to show in Display Mode
+  const displayCandidates = useMemo(() => {
+    const pinned = timers.filter((t) => t.pinned && t.status !== 'FINISHED')
+    if (pinned.length > 0) return pinned
+    const running = timers.filter((t) => t.status !== 'FINISHED')
+    return running.length > 0 ? running : timers
+  }, [timers])
+
+  const timersToRender = displayMode ? displayCandidates.slice(0, displayLayout) : timers
+  const timeSizeClass = displayMode ? (displayLayout === 1 ? 'text-[18vw] md:text-[18vw]' : 'text-[12vw] md:text-[12vw]') : 'text-6xl md:text-7xl'
 
   return (
     <div className="w-full min-h-screen relative text-white">
@@ -196,7 +266,7 @@ export default function TimerBoard() {
       <div className="relative z-10 max-w-7xl mx-auto p-4">
         <header className="flex items-center justify-between gap-4">
           <h1 className="text-3xl font-bold drop-shadow">TCG Store Timers</h1>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             <button
               onClick={() => setShowAdmin((v) => !v)}
               className="px-3 py-2 rounded-2xl bg-white/10 hover:bg-white/20 backdrop-blur border border-white/20"
@@ -212,6 +282,20 @@ export default function TimerBoard() {
               />
               Voice
             </label>
+            <button
+              onClick={() => setDisplayMode((v) => !v)}
+              className="px-3 py-2 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20"
+              title="Minimal display (timers only)"
+            >
+              {displayMode ? "Exit Display" : "Display Mode"}
+            </button>
+            {displayMode && (
+              <div className="flex items-center gap-1 text-sm bg-white/10 px-2 py-2 rounded-2xl border border-white/20">
+                <span className="opacity-80 mr-1">Layout</span>
+                <button onClick={() => setDisplayLayout(1)} className={`px-2 py-1 rounded-xl ${displayLayout===1? 'bg-white/30':'bg-white/10'} border border-white/20`}>1</button>
+                <button onClick={() => setDisplayLayout(2)} className={`px-2 py-1 rounded-xl ${displayLayout===2? 'bg-white/30':'bg-white/10'} border border-white/20`}>2</button>
+              </div>
+            )}
           </div>
         </header>
 
@@ -234,25 +318,28 @@ export default function TimerBoard() {
         {showAdmin && (
           <AdminPanel
             onAddTimer={addTimer}
-            setTickRateMs={setTickRateMs}
-            voiceName={voiceName}
-            setVoiceName={setVoiceName}
+            language={language}
+            setLanguage={setLanguage}
             onBackdropFile={(f) => onBackdropFile(f)}
             clearBackdrop={clearBackdrop}
+            audio={audio}
           />
         )}
 
         {/* Timers Grid */}
-        <div className={`grid ${runningCount <= 1 ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2"} gap-4 mt-4`}>
-          {timers.map((tm) => (
+        <div className={`grid ${displayMode ? (displayLayout === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2') : (runningCount <= 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2')} gap-4 mt-4`}>
+          {timersToRender.map((tm) => (
             <TimerCard
               key={tm.id}
               timer={tm}
               onUpdate={updateTimer}
               onRemove={removeTimer}
+              minimal={displayMode}
+              timeSizeClass={timeSizeClass}
+              showPin={!displayMode && showAdmin}
             />
           ))}
-          {timers.length === 0 && (
+          {!displayMode && timers.length === 0 && (
             <div className="rounded-3xl p-8 bg-black/30 border border-white/10 text-center">
               <p className="opacity-90">No timers yet. Use the admin panel to add a game timer.</p>
             </div>
@@ -260,8 +347,8 @@ export default function TimerBoard() {
         </div>
       </div>
 
-      {/* Big overlay for milestones */}
-      {overlay && (
+      {/* Big overlay for milestones (hidden in Display Mode) */}
+      {overlay && !displayMode && (
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur">
           <div className="text-5xl md:text-7xl font-extrabold text-white drop-shadow-xl animate-pulse">{overlay}</div>
         </div>
@@ -274,10 +361,16 @@ function TimerCard({
   timer,
   onUpdate,
   onRemove,
+  minimal = false,
+  timeSizeClass = 'text-6xl md:text-7xl',
+  showPin = false,
 }: {
   timer: GameTimer
   onUpdate: (id: string, patch: Partial<GameTimer>) => void
   onRemove: (id: string) => void
+  minimal?: boolean
+  timeSizeClass?: string
+  showPin?: boolean
 }) {
   const pct = Math.max(0, Math.min(100, 100 * (timer.remainingSec / timer.durationSec)))
   const isLow = timer.remainingSec <= 120 && timer.status !== "FINISHED"
@@ -292,23 +385,39 @@ function TimerCard({
             <div className="text-xs opacity-80">Total: {formatHHMMSS(timer.durationSec)}</div>
           </div>
         </div>
-        <button
-          onClick={() => onRemove(timer.id)}
-          className="text-sm px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20"
-        >
-          Remove
-        </button>
+        <div className="flex items-center gap-2">
+          {showPin && (
+            <button
+              onClick={() => onUpdate(timer.id, { pinned: !timer.pinned })}
+              className={`text-sm px-3 py-1.5 rounded-xl border ${timer.pinned ? 'bg-amber-400/30 border-amber-300/40' : 'bg-white/10 hover:bg-white/20 border-white/20'}`}
+              title="Show this timer in Display Mode"
+            >
+              {timer.pinned ? 'Pinned' : 'Pin to Display'}
+            </button>
+          )}
+          {!minimal && (
+            <button
+              onClick={() => onRemove(timer.id)}
+              className="text-sm px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20"
+            >
+              Remove
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="px-4">
-        <div className="text-6xl md:text-7xl font-extrabold tracking-wider text-center drop-shadow">
+        <div className={`${timeSizeClass} font-extrabold tracking-wider text-center drop-shadow`}>
           {formatHHMMSS(timer.remainingSec)}
         </div>
-        <div className="h-2 rounded-full bg-white/10 overflow-hidden mt-3">
-          <div className={`h-full ${isLow ? "bg-red-400" : "bg-white"}`} style={{ width: `${pct}%` }} />
-        </div>
+        {!minimal && (
+          <div className="h-2 rounded-full bg-white/10 overflow-hidden mt-3">
+            <div className={`h-full ${isLow ? "bg-red-400" : "bg-white"}`} style={{ width: `${pct}%` }} />
+          </div>
+        )}
       </div>
 
+      {!minimal && (
       <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-2">
         <button
           onClick={() => onUpdate(timer.id, { status: timer.status === "RUNNING" ? "PAUSED" : "RUNNING" })}
@@ -367,36 +476,29 @@ function TimerCard({
           </label>
         </div>
       </div>
+      )}
     </div>
   )
 }
 
 function AdminPanel({
   onAddTimer,
-  setTickRateMs,
-  voiceName,
-  setVoiceName,
+  language,
+  setLanguage,
   onBackdropFile,
   clearBackdrop,
+  audio,
 }: {
   onAddTimer: (preset?: { game?: string; icon?: string; minutes?: number }) => void
-  setTickRateMs: (n: number) => void
-  voiceName?: string
-  setVoiceName: (v?: string) => void
+  language: 'en' | 'es'
+  setLanguage: (v: 'en' | 'es') => void
   onBackdropFile: (f: File) => void
   clearBackdrop: () => void
+  audio: { assets: { five?: string; two?: string; time?: string }; setFile: (k: 'five'|'two'|'time', f: File) => void; clear: (k: 'five'|'two'|'time') => void; play: (k: 'five'|'two'|'time') => boolean }
 }) {
   const [minutes, setMinutes] = useState(PRESETS[0]?.minutes || 50)
   const [game, setGame] = useState(PRESETS[0]?.label || "Untitled Game")
   const [icon, setIcon] = useState(PRESETS[0]?.icon || "🎮")
-  const [customIconUrl, setCustomIconUrl] = useState("")
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
-
-  useEffect(() => {
-    const load = () => setVoices(window.speechSynthesis.getVoices())
-    load()
-    window.speechSynthesis.onvoiceschanged = load
-  }, [])
 
   return (
     <div className="mt-4 p-4 rounded-3xl bg-black/30 border border-white/10">
@@ -446,17 +548,8 @@ function AdminPanel({
                 onChange={(e) => setIcon(e.target.value)}
               />
             </label>
-            <label className="text-sm flex items-center gap-2 bg-white/10 px-3 py-2 rounded-2xl border border-white/20 md:col-span-2">
-              or Icon URL
-              <input
-                className="text-black rounded-xl px-2 py-1 w-full"
-                placeholder="https://..."
-                value={customIconUrl}
-                onChange={(e) => setCustomIconUrl(e.target.value)}
-              />
-            </label>
             <button
-              onClick={() => onAddTimer({ game, icon: customIconUrl || icon, minutes })}
+              onClick={() => onAddTimer({ game, icon, minutes })}
               className="px-3 py-2 rounded-2xl bg-emerald-400/20 hover:bg-emerald-400/30 border border-emerald-300/40"
             >
               + Add Timer
@@ -467,30 +560,46 @@ function AdminPanel({
         <div className="space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <label className="text-sm flex items-center gap-2 bg-white/10 px-3 py-2 rounded-2xl border border-white/20">
-              Tick rate (ms)
-              <input
-                type="number"
-                min={250}
-                step={250}
-                className="text-black rounded-xl px-2 py-1 w-full"
-                defaultValue={1000}
-                onChange={(e) => setTickRateMs(Math.max(250, Number(e.target.value) || 1000))}
-              />
-            </label>
-
-            <label className="text-sm flex items-center gap-2 bg-white/10 px-3 py-2 rounded-2xl border border-white/20">
-              Voice
+              Language
               <select
                 className="text-black rounded-xl px-2 py-1 w-full"
-                value={voiceName || ""}
-                onChange={(e) => setVoiceName(e.target.value || undefined)}
+                value={language}
+                onChange={(e) => setLanguage((e.target.value as 'en' | 'es') || 'en')}
               >
-                <option value="">System default</option>
-                {voices.map((v) => (
-                  <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
-                ))}
+                <option value="en">English</option>
+                <option value="es">Español</option>
               </select>
             </label>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm opacity-90">Announcement audio (optional)</div>
+            <div className="grid md:grid-cols-3 gap-3">
+              <div className="bg-white/10 p-3 rounded-2xl border border-white/20">
+                <div className="text-xs opacity-80 mb-1">5‑minute</div>
+                <input type="file" accept="audio/*" onChange={(e)=>{const f=e.target.files?.[0]; if(f) audio.setFile('five', f)}} />
+                <div className="mt-2 flex gap-2">
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.play('five')}>Test</button>
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.clear('five')}>Clear</button>
+                </div>
+              </div>
+              <div className="bg-white/10 p-3 rounded-2xl border border-white/20">
+                <div className="text-xs opacity-80 mb-1">2‑minute</div>
+                <input type="file" accept="audio/*" onChange={(e)=>{const f=e.target.files?.[0]; if(f) audio.setFile('two', f)}} />
+                <div className="mt-2 flex gap-2">
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.play('two')}>Test</button>
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.clear('two')}>Clear</button>
+                </div>
+              </div>
+              <div className="bg-white/10 p-3 rounded-2xl border border-white/20">
+                <div className="text-xs opacity-80 mb-1">Time‑up</div>
+                <input type="file" accept="audio/*" onChange={(e)=>{const f=e.target.files?.[0]; if(f) audio.setFile('time', f)}} />
+                <div className="mt-2 flex gap-2">
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.play('time')}>Test</button>
+                  <button className="text-xs px-2 py-1 rounded-xl bg-white/10 border border-white/20" onClick={()=>audio.clear('time')}>Clear</button>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="flex items-center gap-3">
@@ -512,7 +621,7 @@ function AdminPanel({
           </div>
 
           <p className="text-xs opacity-80">
-            Tip: Keep this page open on your display. You can toggle admin mode to prevent accidental edits.
+            Tip: Pin one or two timers to control which are shown in Display Mode. Click **Display Mode** then **Toggle Fullscreen** for TVs.
           </p>
         </div>
       </div>
