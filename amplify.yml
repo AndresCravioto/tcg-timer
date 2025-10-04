@@ -1,18 +1,18 @@
+@"
 version: 1
 frontend:
   phases:
     preBuild:
       commands:
-        - cd tcg-timer
         - npm install
     build:
       commands:
-        - cd tcg-timer
         - npm run build
   artifacts:
-    baseDirectory: tcg-timer/dist
+    baseDirectory: dist
     files:
       - '**/*'
   cache:
     paths:
-      - tcg-timer/node_modules/**/*
+      - node_modules/**/*
+"@ | Set-Content -NoNewline -Encoding UTF8 .\amplify.yml
