@@ -3,14 +3,16 @@ frontend:
   phases:
     preBuild:
       commands:
+        - cd tcg-timer
         - npm install
     build:
       commands:
+        - cd tcg-timer
         - npm run build
   artifacts:
-    baseDirectory: dist
+    baseDirectory: tcg-timer/dist
     files:
       - '**/*'
   cache:
     paths:
-      - node_modules/**/*
+      - tcg-timer/node_modules/**/*
